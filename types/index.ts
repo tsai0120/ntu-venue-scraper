@@ -32,5 +32,8 @@ export interface SwapSuggestion {
   toDept: string;
   description: string;
   benefit: string; // Why this swap is good
+  date: string; // YYYY-MM-DD
+  fromSlots: string[]; // e.g. ["排球場1 18:00-20:00"]
+  toSlots: string[];
   score: number; // Confidence/Impact score
 }

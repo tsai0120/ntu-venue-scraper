@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Booking, DepartmentStats, SwapSuggestion } from '@/types';
 
 // College list
@@ -25,8 +25,8 @@ const getWeekRange = (weekNum: number) => {
 
 export default function Home() {
   const [loading, setLoading] = useState(false);
-  const [bookings, setBookings] = useState<Booking[]>([]);
-  const [stats, setStats] = useState<DepartmentStats[]>([]);
+  const [allBookings, setAllBookings] = useState<Booking[]>([]);
+  const [allStats, setAllStats] = useState<DepartmentStats[]>([]);
   const [allSuggestions, setAllSuggestions] = useState<SwapSuggestion[]>([]); // Store all suggestions
   const [filteredSuggestions, setFilteredSuggestions] = useState<SwapSuggestion[]>([]); // Filtered for display
   const [academicWeek, setAcademicWeek] = useState('');
@@ -34,13 +34,19 @@ export default function Home() {
 
   // Group data from API
   const [groups, setGroups] = useState<any[]>([]);
-  const [groupsByCollege, setGroupsByCollege] = useState<Record<string, any[]>>({});
-  const [allTeamNames, setAllTeamNames] = useState<string[]>([]);
   const [ungroupedDepts, setUngroupedDepts] = useState<string[]>([]);
 
   // UI State
   const [viewMode, setViewMode] = useState<'day' | 'week'>('day');
-  const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [scheduleView, setScheduleView] = useState<'list' | 'table'>('list');
+  const [sortBy, setSortBy] = useState<'time' | 'venue'>('time');
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
+  const [activeCell, setActiveCell] = useState<string | null>(null); // Key: "date-venue"
+  const [date, setDate] = useState<string>('');
+
+  useEffect(() => {
+    setDate(new Date().toISOString().split('T')[0]);
+  }, []);
   const [selectedWeek, setSelectedWeek] = useState<number>(12);
   const [myDept, setMyDept] = useState<string>('');
   const [filterDepts, setFilterDepts] = useState<string[]>([]);
@@ -64,8 +70,6 @@ export default function Home() {
       const data = await res.json();
       if (data.success) {
         setGroups(data.groups || []);
-        setGroupsByCollege(data.byCollege || {});
-        setAllTeamNames(data.allNames || []);
       }
     } catch (err) {
       console.error('Failed to load groups:', err);
@@ -106,6 +110,90 @@ export default function Home() {
     handleFilterSwaps();
   }, [allSuggestions, myDept]);
 
+  // Helper to get Team Name from Department Name
+  const getTeamName = (deptName: string) => {
+    const group = groups.find(g => g.name === deptName || g.aliases.includes(deptName));
+    return group ? group.name : 'Null';
+  };
+
+  const formatDateWithDay = (dateStr: string) => {
+    const date = new Date(dateStr);
+    const days = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+    return `${dateStr} ${days[date.getDay()]}`;
+  };
+
+  // Derived State: Filtered Bookings
+  const filteredBookings = useMemo(() => {
+    if (filterDepts.length === 0) return allBookings;
+    return allBookings.filter(b => {
+      const teamName = getTeamName(b.department);
+      return filterDepts.includes(teamName);
+    });
+  }, [allBookings, filterDepts, groups]);
+
+  // Derived State: Filtered Stats
+  const filteredStats = useMemo(() => {
+    if (filterDepts.length === 0) return allStats;
+    return allStats.filter(s => filterDepts.includes(s.department));
+  }, [allStats, filterDepts]);
+
+  // Derived Lists for Dropdowns
+  const allDepts = useMemo(() => Array.from(new Set(allBookings.map(b => b.department))).sort(), [allBookings]);
+  const allTeamNames = useMemo(() => groups.map(g => g.name).sort(), [groups]);
+
+  // Add Filter Helper
+  const addFilterDept = (val: string) => {
+    if (!filterDepts.includes(val)) {
+      setFilterDepts([...filterDepts, val]);
+    }
+  };
+
+  // Handle Save Team
+  const handleSaveTeam = async (deptName: string, newTeamName: string) => {
+    // Find if team exists
+    let targetGroup = groups.find(g => g.name === newTeamName);
+
+    // Remove dept from any other group first
+    for (const g of groups) {
+      if (g.aliases.includes(deptName) && g.name !== newTeamName) {
+        const updated = { ...g, aliases: g.aliases.filter(a => a !== deptName) };
+        await fetch('/api/groups', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'update', group: updated })
+        });
+      }
+    }
+
+    if (targetGroup) {
+      // Update existing
+      if (!targetGroup.aliases.includes(deptName)) {
+        const updated = { ...targetGroup, aliases: [...targetGroup.aliases, deptName] };
+        await fetch('/api/groups', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'update', group: updated })
+        });
+      }
+    } else {
+      // Create new
+      const newGroup = {
+        id: newTeamName.toLowerCase().replace(/\s+/g, '-'),
+        name: newTeamName,
+        aliases: [deptName],
+        college: 'Other'
+      };
+      await fetch('/api/groups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'add', group: newGroup })
+      });
+    }
+
+    // Refresh
+    fetchGroups();
+  };
+
   const handleScrape = async (forceRefresh = false) => {
     setLoading(true);
     try {
@@ -119,20 +207,23 @@ export default function Home() {
         url += `startDate=${start}&endDate=${end}`;
       }
 
-      // Don't send myDept to API anymore - we filter client-side
-      if (filterDepts.length > 0) url += `&filterDepts=${encodeURIComponent(filterDepts.join(','))}`;
+      // Client-side filtering now, so we don't send filterDepts
       if (forceRefresh) url += `&refresh=true`;
 
       const res = await fetch(url);
       const data = await res.json();
 
       if (data.success) {
-        setBookings(data.data);
-        setStats(data.stats);
+        setAllBookings(data.data);
+        setAllStats(data.stats);
         setAllSuggestions(data.suggestions); // Store all suggestions
         setFilteredSuggestions(data.suggestions); // Initially show all
         setAcademicWeek(data.academicWeek);
         setFromCache(data.fromCache || false);
+
+        // Initialize expanded dates (expand all by default)
+        const uniqueDates = new Set(data.data.map((b: Booking) => b.date));
+        setExpandedDates(uniqueDates as Set<string>);
       } else {
         alert('Scraping failed: ' + data.error);
       }
@@ -161,11 +252,10 @@ export default function Home() {
   const getTeamsForCollege = (college: string) => {
     // For joint teams, show in multiple colleges
     return groups.filter(g => {
-      // Check if the team belongs to this college
-      if (g.college === college) return true;
-      // For joint teams, check if any alias suggests it belongs to multiple colleges
-      // This is a simplified approach - you might want to enhance this logic
-      return false;
+      // Check if the team belongs to this college (support multiple colleges)
+      // Fallback to single college property for backward compatibility
+      const colleges = g.colleges || (g.college ? [g.college] : []);
+      return colleges.includes(college);
     });
   };
 
@@ -176,11 +266,11 @@ export default function Home() {
 
   // Get bookings for a specific department
   const getBookingsForDept = (deptName: string) => {
-    return bookings.filter(b => b.department === deptName);
+    return allBookings.filter(b => b.department === deptName);
   };
 
   // Group bookings by date for better display
-  const bookingsByDate = bookings.reduce((acc, b) => {
+  const bookingsByDate = filteredBookings.reduce((acc, b) => {
     if (!acc[b.date]) acc[b.date] = [];
     acc[b.date].push(b);
     return acc;
@@ -303,69 +393,65 @@ export default function Home() {
           {/* Two-Dropdown Filter with Chips */}
           <div className="pt-4 border-t border-gray-100">
             <div className="flex items-start gap-4">
-              <label className="text-sm font-medium text-slate-800 pt-2 whitespace-nowrap">Filter Departments / Teams:</label>
+              <div className="w-1/3">
+                <label className="block text-sm font-medium text-slate-700 mb-1">Department</label>
+                <select
+                  className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white text-slate-700"
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      addFilterDept(e.target.value);
+                      e.target.value = '';
+                    }
+                  }}
+                >
+                  <option value="">Select Department...</option>
+                  {allDepts.map(d => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="w-1/3">
+                <label className="block text-sm font-medium text-slate-700 mb-1">Team</label>
+                <select
+                  className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white text-slate-700"
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      addFilterDept(e.target.value);
+                      e.target.value = '';
+                    }
+                  }}
+                >
+                  <option value="">Select Team...</option>
+                  {allTeamNames.map(t => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
-              <div className="flex-1">
-                {/* Dropdowns */}
-                <div className="flex gap-2 mb-3">
-                  <select
-                    value={selectedCollege}
-                    onChange={(e) => {
-                      setSelectedCollege(e.target.value);
-                      setSelectedTeam('');
-                    }}
-                    className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white"
-                  >
-                    <option value="">-- Select College --</option>
-                    {COLLEGES.map(college => (
-                      <option key={college} value={college}>{college}</option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={selectedTeam}
-                    onChange={(e) => setSelectedTeam(e.target.value)}
-                    disabled={!selectedCollege}
-                    className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white disabled:bg-gray-100 disabled:cursor-not-allowed"
-                  >
-                    <option value="">-- Select Team --</option>
-                    {selectedCollege && getTeamsForCollege(selectedCollege).map(team => (
-                      <option key={team.id} value={team.name}>{team.name}</option>
-                    ))}
-                  </select>
-
+            {/* Selected Teams Chips */}
+            <div className="flex flex-wrap gap-2 mt-3">
+              {filterDepts.map(team => (
+                <div key={team} className="bg-blue-100 text-blue-800 px-3 py-1.5 rounded-lg flex items-center gap-2 text-sm">
+                  <span>{team}</span>
                   <button
-                    onClick={addTeamToFilter}
-                    disabled={!selectedTeam}
-                    className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={() => removeTeamFromFilter(team)}
+                    className="hover:bg-blue-200 rounded-full w-5 h-5 flex items-center justify-center transition-colors"
                   >
-                    Add
+                    ✕
                   </button>
                 </div>
-
-                {/* Selected Teams Chips */}
-                <div className="flex flex-wrap gap-2">
-                  {filterDepts.map(team => (
-                    <div key={team} className="bg-blue-100 text-blue-800 px-3 py-1.5 rounded-lg flex items-center gap-2 text-sm">
-                      <span>{team}</span>
-                      <button
-                        onClick={() => removeTeamFromFilter(team)}
-                        className="hover:bg-blue-200 rounded-full w-5 h-5 flex items-center justify-center transition-colors"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              ))}
             </div>
           </div>
         </div>
+      </div>
 
-        {/* Teams Editor Modal */}
-        {showTeamsEditor && (
+      {/* Teams Editor Modal */}
+      {
+        showTeamsEditor && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto text-slate-900">
               <div className="sticky top-0 bg-white border-b p-6 flex justify-between items-center">
                 <h2 className="text-2xl font-bold text-gray-800">Teams Editor (系隊編輯器)</h2>
                 <button
@@ -405,7 +491,7 @@ export default function Home() {
                           type="text"
                           value={editingGroup.name}
                           onChange={(e) => setEditingGroup({ ...editingGroup, name: e.target.value })}
-                          className="w-full border rounded px-3 py-2"
+                          className="w-full border rounded px-3 py-2 text-slate-900"
                           placeholder="e.g., 歷史資管聯隊"
                         />
                       </div>
@@ -413,7 +499,7 @@ export default function Home() {
                       {/* Multi-Select Colleges (Checkboxes) */}
                       <div>
                         <label className="block text-sm font-medium mb-2">Colleges (學院, can select multiple):</label>
-                        <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto border rounded p-3 bg-white">
+                        <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto border rounded p-3 bg-white text-slate-900">
                           {COLLEGES.map(college => (
                             <label key={college} className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 p-1 rounded">
                               <input
@@ -442,7 +528,7 @@ export default function Home() {
                           <select
                             value={selectedAlias}
                             onChange={(e) => setSelectedAlias(e.target.value)}
-                            className="flex-1 border rounded px-3 py-2 text-sm bg-white"
+                            className="flex-1 border rounded px-3 py-2 text-sm bg-white text-slate-900"
                           >
                             <option value="">-- Select Account Name --</option>
                             {ungroupedDepts
@@ -493,11 +579,15 @@ export default function Home() {
                       <div className="flex gap-2">
                         <button
                           onClick={async () => {
+                            if (!editingGroup.name) {
+                              alert('Please enter a team name');
+                              return;
+                            }
                             const action = groups.find(g => g.id === editingGroup.id) ? 'update' : 'add';
                             await saveGroup(editingGroup, action);
                             await fetchUngroupedDepts(); // Refresh ungrouped list
                           }}
-                          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"
+                          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors"
                         >
                           Save
                         </button>
@@ -506,7 +596,7 @@ export default function Home() {
                             setEditingGroup(null);
                             setSelectedAlias('');
                           }}
-                          className="bg-gray-400 hover:bg-gray-500 text-white px-4 py-2 rounded-lg"
+                          className="bg-gray-400 hover:bg-gray-500 text-white px-4 py-2 rounded-lg font-medium transition-colors"
                         >
                           Cancel
                         </button>
@@ -515,46 +605,54 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Teams List by College */}
-                {Object.entries(groupsByCollege).map(([college, teams]) => (
-                  <div key={college} className="border rounded-lg p-4">
-                    <h3 className="font-bold text-lg mb-3">{college}</h3>
-                    <div className="space-y-2">
-                      {teams.map((team: any) => (
-                        <div key={team.id} className="bg-white p-3 rounded border flex justify-between items-start">
-                          <div>
-                            <div className="font-semibold">{team.name}</div>
-                            <div className="text-sm text-slate-700">Aliases: {team.aliases.join(', ')}</div>
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => setEditingGroup(team)}
-                              className="text-blue-600 hover:text-blue-800 text-sm"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (confirm(`Delete ${team.name}?`)) {
-                                  saveGroup(team, 'delete');
-                                }
-                              }}
-                              className="text-red-600 hover:text-red-800 text-sm"
-                            >
-                              Delete
-                            </button>
+                {/* Teams List (Flat List) */}
+                <div className="space-y-3">
+                  {groups.map((team: any) => (
+                    <div key={team.id} className="bg-white p-4 rounded-lg border border-gray-200 hover:border-blue-300 transition-colors flex justify-between items-start shadow-sm">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-bold text-lg text-gray-900">{team.name}</span>
+                          <div className="flex gap-1">
+                            {team.colleges?.map((c: string) => (
+                              <span key={c} className="bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded-full">
+                                {c}
+                              </span>
+                            ))}
                           </div>
                         </div>
-                      ))}
+                        <div className="text-sm text-slate-600">
+                          <span className="font-medium">Aliases:</span> {team.aliases?.length > 0 ? team.aliases.join(', ') : <span className="italic text-gray-400">None</span>}
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setEditingGroup(team)}
+                          className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-sm font-medium transition-colors"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (confirm(`Delete ${team.name}?`)) {
+                              saveGroup(team, 'delete');
+                            }
+                          }}
+                          className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded text-sm font-medium transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-        )}
+        )
+      }
 
-        {bookings.length > 0 && (
+      {
+        allBookings.length > 0 && (
           <div className="space-y-8">
 
             {/* Stats & Suggestions */}
@@ -567,54 +665,49 @@ export default function Home() {
                 <p className="text-sm text-slate-600 mb-4">{getTimePeriod()}</p>
                 <div className="overflow-x-auto max-h-96">
                   <table className="w-full text-sm">
-                    <thead className="sticky top-0 bg-white">
+                    <thead>
                       <tr className="bg-gray-50 border-b">
-                        <th className="p-2 text-left">Team</th>
-                        <th className="p-2 text-center">Total Hr</th>
-                        <th className="p-2 text-center">Front</th>
-                        <th className="p-2 text-center">Back</th>
-                        <th className="p-2 text-center">Full</th>
+                        <th className="p-2 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">Department</th>
+                        <th className="p-2 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider">Total Hours</th>
+                        <th className="p-2 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider text-orange-700">Front (18-20)</th>
+                        <th className="p-2 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider text-indigo-700">Back (20-22)</th>
+                        <th className="p-2 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider text-green-700">Full Blocks</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {stats.map((s, i) => (
-                        <>
-                          <tr
-                            key={i}
-                            className="border-b hover:bg-gray-50 cursor-pointer"
-                            onClick={() => toggleDeptDetails(s.department)}
-                          >
-                            <td className="p-2 font-medium text-blue-600">{s.department}</td>
-                            <td className="p-2 text-center">{s.totalHours}</td>
-                            <td className="p-2 text-center text-orange-600 font-medium">{s.frontSlots}</td>
-                            <td className="p-2 text-center text-indigo-600 font-medium">{s.backSlots}</td>
-                            <td className="p-2 text-center text-green-600 font-bold">{s.fullBlocks}</td>
-                          </tr>
-                          {expandedDept === s.department && (
-                            <tr>
-                              <td colSpan={5} className="p-4 bg-blue-50 border-b">
-                                <div className="text-xs space-y-1">
-                                  <div className="font-semibold mb-2">Bookings for {s.department}:</div>
-                                  {getBookingsForDept(s.department).map((b, idx) => (
-                                    <div key={idx} className="flex gap-2 text-slate-800">
-                                      <span className="font-mono">{b.date}</span>
-                                      <span className="font-mono">{b.timeSlot}</span>
-                                      <span>{b.venueId}</span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </td>
-                            </tr>
-                          )}
-                        </>
+                      {filteredStats.map((s, i) => (
+                        <tr key={i} className="border-b hover:bg-gray-50 cursor-pointer" onClick={() => toggleDeptDetails(s.department)}>
+                          <td className="p-2 font-medium text-blue-600 text-slate-700">{s.department}</td>
+                          <td className="p-2 text-center text-slate-700">{s.totalHours}</td>
+                          <td className="p-2 text-center text-orange-600 font-medium">{s.frontSlots}</td>
+                          <td className="p-2 text-center text-indigo-600 font-medium">{s.backSlots}</td>
+                          <td className="p-2 text-center text-green-600 font-bold">{s.fullBlocks}</td>
+                        </tr>
                       ))}
+                      {expandedDept && filteredStats.find(s => s.department === expandedDept) && (
+                        <tr>
+                          <td colSpan={5} className="p-4 bg-blue-50 border-b">
+                            {/* Details content */}
+                            <div className="text-xs space-y-1">
+                              <div className="font-semibold mb-2 text-slate-800">Bookings for {expandedDept}:</div>
+                              {getBookingsForDept(expandedDept).map((b, idx) => (
+                                <div key={idx} className="flex gap-2 text-slate-800">
+                                  <span className="font-mono">{b.date}</span>
+                                  <span className="font-mono">{b.timeSlot}</span>
+                                  <span>{b.venueId}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
               </div>
 
               {/* Swap Suggestions */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col h-full">
                 <h2 className="text-xl font-bold mb-4 text-gray-800">Swap Suggestions</h2>
 
                 {/* My Dept Filter (Dropdown) */}
@@ -624,7 +717,7 @@ export default function Home() {
                     <select
                       value={myDept}
                       onChange={(e) => setMyDept(e.target.value)}
-                      className="flex-1 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                      className="flex-1 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white text-slate-700"
                     >
                       <option value="">-- All Teams --</option>
                       {allTeamNames.map(name => (
@@ -640,68 +733,281 @@ export default function Home() {
                   </div>
                 </div>
 
-                {filteredSuggestions.length === 0 ? (
-                  <p className="text-slate-600 italic">No swap opportunities found.</p>
-                ) : (
-                  <div className="space-y-4 max-h-64 overflow-y-auto">
-                    {filteredSuggestions.map((s: SwapSuggestion, i: number) => (
+                <div className="flex-1 overflow-y-auto max-h-96 pr-2 space-y-4">
+                  {filteredSuggestions.length === 0 ? (
+                    <p className="text-slate-600 italic">No swap opportunities found.</p>
+                  ) : (
+                    filteredSuggestions.map((s: SwapSuggestion, i: number) => (
                       <div key={i} className="p-4 bg-yellow-50 border border-yellow-100 rounded-lg">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="bg-yellow-200 text-yellow-800 text-xs px-2 py-1 rounded-full font-bold">SWAP</span>
-                          <span className="font-medium text-gray-800">{s.fromDept} ↔ {s.toDept}</span>
+                        <div className="flex justify-between items-start mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="bg-yellow-200 text-yellow-800 text-xs px-2 py-1 rounded-full font-bold">SWAP</span>
+                            <span className="font-bold text-slate-800 text-sm">{s.date}</span>
+                          </div>
                         </div>
-                        <p className="text-sm text-slate-800 mb-1">{s.description}</p>
-                        <p className="text-xs text-slate-600">Why: {s.benefit}</p>
+                        <div className="font-medium text-gray-900 mb-2 text-lg text-center bg-white/50 p-2 rounded border border-yellow-200">
+                          {s.fromDept} ↔ {s.toDept}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs mb-2">
+                          <div className="bg-orange-50 p-2 rounded border border-orange-100">
+                            <div className="font-semibold text-orange-800 mb-1">Gives (Front):</div>
+                            {s.fromSlots?.map((slot, idx) => <div key={idx} className="text-slate-700">{slot}</div>)}
+                          </div>
+                          <div className="bg-indigo-50 p-2 rounded border border-indigo-100">
+                            <div className="font-semibold text-indigo-800 mb-1">Receives (Back):</div>
+                            {s.toSlots?.map((slot, idx) => <div key={idx} className="text-slate-700">{slot}</div>)}
+                          </div>
+                        </div>
+
+                        <p className="text-xs text-slate-600 italic border-t border-yellow-200 pt-2 mt-2">Why: {s.benefit}</p>
                       </div>
-                    ))}
-                  </div>
-                )}
+                    ))
+                  )}
+                </div>
               </div>
             </div>
 
             {/* Schedule Section */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-2xl font-bold text-gray-800">Schedule ({bookings.length} bookings)</h2>
-                {academicWeek && <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">{academicWeek}</span>}
+              <div className="flex flex-col md:flex-row justify-between items-center mb-4 gap-4">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-2xl font-bold text-slate-800">Schedule ({filteredBookings.length})</h2>
+                  {academicWeek && <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">{academicWeek}</span>}
+                </div>
+
+                {/* View & Sort Controls (Moved Here) */}
+                <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-2 bg-gray-50 p-1 rounded-lg border border-gray-200">
+                    <button
+                      onClick={() => setScheduleView('list')}
+                      className={`px-3 py-1 rounded text-sm font-medium transition-all ${scheduleView === 'list' ? 'bg-white shadow text-blue-700' : 'text-slate-600 hover:text-slate-800'}`}
+                    >
+                      List
+                    </button>
+                    <button
+                      onClick={() => setScheduleView('table')}
+                      className={`px-3 py-1 rounded text-sm font-medium transition-all ${scheduleView === 'table' ? 'bg-white shadow text-blue-700' : 'text-slate-600 hover:text-slate-800'}`}
+                    >
+                      Table
+                    </button>
+                  </div>
+
+                  {scheduleView === 'list' && (
+                    <div className="flex items-center gap-2 bg-gray-50 p-1 rounded-lg border border-gray-200">
+                      <span className="text-xs font-semibold text-slate-500 px-2">Sort:</span>
+                      <button
+                        onClick={() => setSortBy('time')}
+                        className={`px-3 py-1 rounded text-sm font-medium transition-all ${sortBy === 'time' ? 'bg-white shadow text-blue-700' : 'text-slate-600 hover:text-slate-800'}`}
+                      >
+                        Time
+                      </button>
+                      <button
+                        onClick={() => setSortBy('venue')}
+                        className={`px-3 py-1 rounded text-sm font-medium transition-all ${sortBy === 'venue' ? 'bg-white shadow text-blue-700' : 'text-slate-600 hover:text-slate-800'}`}
+                      >
+                        Venue
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div className="space-y-8">
-                {Object.entries(bookingsByDate).sort().map(([dateKey, dateBookings]) => (
-                  <div key={dateKey}>
-                    <h3 className="text-lg font-semibold text-slate-800 mb-2 sticky top-0 bg-white py-2 border-b">{dateKey}</h3>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="bg-gray-50 border-b">
-                            <th className="p-3 font-semibold text-slate-700 w-32">Venue</th>
-                            <th className="p-3 font-semibold text-slate-700 w-32">Time</th>
-                            <th className="p-3 font-semibold text-slate-700">Department</th>
-                            <th className="p-3 font-semibold text-slate-700 w-24">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {dateBookings.map((b, i) => (
-                            <tr key={i} className="border-b hover:bg-gray-50">
-                              <td className="p-3 text-gray-800">{b.venueId}</td>
-                              <td className="p-3 text-slate-700 font-mono">{b.timeSlot}</td>
-                              <td className="p-3 font-medium text-blue-600">{b.department}</td>
-                              <td className="p-3">
-                                <span className="bg-green-100 text-green-800 px-2 py-1 rounded-full text-xs font-medium">
-                                  {b.status}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                {Object.entries(bookingsByDate).sort().map(([dateKey, dateBookings]) => {
+                  const isExpanded = expandedDates.has(dateKey);
+
+                  // Sort bookings
+                  const sortedBookings = [...dateBookings].sort((a, b) => {
+                    if (sortBy === 'time') return a.timeSlot.localeCompare(b.timeSlot) || a.venueId.localeCompare(b.venueId);
+                    return a.venueId.localeCompare(b.venueId) || a.timeSlot.localeCompare(b.timeSlot);
+                  });
+
+                  return (
+                    <div key={dateKey} className="border rounded-lg overflow-hidden">
+                      {/* Date Header (Toggle) */}
+                      <div
+                        className="bg-gray-50 p-3 flex justify-between items-center cursor-pointer hover:bg-gray-100 transition-colors"
+                        onClick={() => {
+                          const newSet = new Set(expandedDates);
+                          if (newSet.has(dateKey)) newSet.delete(dateKey);
+                          else newSet.add(newSet.has(dateKey) ? dateKey : dateKey);
+                          setExpandedDates(newSet);
+                        }}
+                      >
+                        <h3 className="text-lg font-semibold text-slate-800">{formatDateWithDay(dateKey)}</h3>
+                        <span className="text-slate-500">{isExpanded ? '▼' : '▶'}</span>
+                      </div>
+
+                      {isExpanded && (
+                        <div className="p-4">
+                          {scheduleView === 'list' ? (
+                            /* List View */
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left border-collapse">
+                                <thead>
+                                  <tr className="bg-gray-50 border-b">
+                                    <th className="p-3 font-semibold text-slate-700 w-32">Venue</th>
+                                    <th className="p-3 font-semibold text-slate-700 w-32">Time</th>
+                                    <th className="p-3 font-semibold text-slate-700">Team</th>
+                                    <th className="p-3 font-semibold text-slate-700">Department</th>
+                                    <th className="p-3 font-semibold text-slate-700 w-24">Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {sortedBookings.map((b, i) => (
+                                    <tr key={i} className="border-b hover:bg-gray-50">
+                                      <td className="p-3 text-slate-800">{b.venueId}</td>
+                                      <td className="p-3 text-slate-700 font-mono">{b.timeSlot}</td>
+                                      <td className="p-3 font-medium text-blue-700">{getTeamName(b.department)}</td>
+                                      <td className="p-3 text-slate-600 text-sm">{b.department}</td>
+                                      <td className="p-3">
+                                        <span className="bg-green-100 text-green-800 px-2 py-1 rounded-full text-xs font-medium">
+                                          {b.status}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : (
+                            /* Table View (2x7 Grid) */
+                            <div className="overflow-x-auto">
+                              <table className="w-full border-collapse border border-gray-200">
+                                <thead>
+                                  <tr className="bg-gray-100">
+                                    <th className="border p-2 text-slate-700 w-20 font-semibold">Time</th>
+                                    {[1, 2, 3, 4, 5, 6, 7].map(n => (
+                                      <th key={n} className="border p-2 text-slate-700 text-center font-semibold">排球場 {n}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {/* Front Slots (18:00 - 20:00) */}
+                                  <tr>
+                                    <td className="border p-2 font-semibold text-slate-700 bg-orange-50 text-center">18:00<br />|<br />20:00</td>
+                                    {[1, 2, 3, 4, 5, 6, 7].map(n => {
+                                      const venueId = `排球場${n}`;
+                                      const cellKey = `${dateKey}-${venueId}-front`;
+                                      // Find booking for this venue in 18-20 range
+                                      const booking = dateBookings.find(b => b.venueId === venueId && parseInt(b.timeSlot) < 20);
+
+                                      // Determine display name
+                                      let displayName = '-';
+                                      let isTeam = false;
+                                      if (booking) {
+                                        const team = getTeamName(booking.department);
+                                        if (team !== 'Null') {
+                                          displayName = team;
+                                          isTeam = true;
+                                        } else {
+                                          displayName = booking.department;
+                                        }
+                                      }
+
+                                      const isActive = activeCell === cellKey;
+
+                                      return (
+                                        <td
+                                          key={n}
+                                          className={`border p-2 text-center h-24 align-middle transition-colors relative cursor-pointer ${isActive ? 'bg-blue-50 ring-2 ring-blue-400' : 'hover:bg-gray-50'}`}
+                                          onClick={() => booking && setActiveCell(isActive ? null : cellKey)}
+                                        >
+                                          {booking ? (
+                                            <div className="flex flex-col items-center justify-center h-full w-full">
+                                              <span className={`font-bold text-sm ${isTeam ? 'text-blue-700' : 'text-slate-700'}`}>
+                                                {displayName}
+                                              </span>
+
+                                              {/* Click to Reveal Details */}
+                                              {isActive && (
+                                                <div className="absolute z-20 bottom-full mb-2 bg-white border border-slate-200 shadow-xl rounded-lg p-3 text-left w-48 text-sm">
+                                                  <div className="font-bold text-slate-800 mb-1">{booking.department}</div>
+                                                  <div className="text-slate-600 text-xs mb-1">{booking.timeSlot}</div>
+                                                  <div className="text-slate-500 text-xs">{venueId}</div>
+                                                  <div className="mt-2 text-xs text-blue-600 font-medium">
+                                                    {isTeam ? `Team: ${displayName}` : 'Unassigned Team'}
+                                                  </div>
+                                                </div>
+                                              )}
+                                            </div>
+                                          ) : (
+                                            <span className="text-gray-300 text-xs">-</span>
+                                          )}
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                  {/* Back Slots (20:00 - 22:00) */}
+                                  <tr>
+                                    <td className="border p-2 font-semibold text-slate-700 bg-indigo-50 text-center">20:00<br />|<br />22:00</td>
+                                    {[1, 2, 3, 4, 5, 6, 7].map(n => {
+                                      const venueId = `排球場${n}`;
+                                      const cellKey = `${dateKey}-${venueId}-back`;
+                                      // Find booking for this venue in 20-22 range
+                                      const booking = dateBookings.find(b => b.venueId === venueId && parseInt(b.timeSlot) >= 20);
+
+                                      // Determine display name
+                                      let displayName = '-';
+                                      let isTeam = false;
+                                      if (booking) {
+                                        const team = getTeamName(booking.department);
+                                        if (team !== 'Null') {
+                                          displayName = team;
+                                          isTeam = true;
+                                        } else {
+                                          displayName = booking.department;
+                                        }
+                                      }
+
+                                      const isActive = activeCell === cellKey;
+
+                                      return (
+                                        <td
+                                          key={n}
+                                          className={`border p-2 text-center h-24 align-middle transition-colors relative cursor-pointer ${isActive ? 'bg-blue-50 ring-2 ring-blue-400' : 'hover:bg-gray-50'}`}
+                                          onClick={() => booking && setActiveCell(isActive ? null : cellKey)}
+                                        >
+                                          {booking ? (
+                                            <div className="flex flex-col items-center justify-center h-full w-full">
+                                              <span className={`font-bold text-sm ${isTeam ? 'text-blue-700' : 'text-slate-700'}`}>
+                                                {displayName}
+                                              </span>
+
+                                              {/* Click to Reveal Details */}
+                                              {isActive && (
+                                                <div className="absolute z-20 bottom-full mb-2 bg-white border border-slate-200 shadow-xl rounded-lg p-3 text-left w-48 text-sm">
+                                                  <div className="font-bold text-slate-800 mb-1">{booking.department}</div>
+                                                  <div className="text-slate-600 text-xs mb-1">{booking.timeSlot}</div>
+                                                  <div className="text-slate-500 text-xs">{venueId}</div>
+                                                  <div className="mt-2 text-xs text-blue-600 font-medium">
+                                                    {isTeam ? `Team: ${displayName}` : 'Unassigned Team'}
+                                                  </div>
+                                                </div>
+                                              )}
+                                            </div>
+                                          ) : (
+                                            <span className="text-gray-300 text-xs">-</span>
+                                          )}
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
-        )}
+        )
+      }
       </div>
     </main>
   );

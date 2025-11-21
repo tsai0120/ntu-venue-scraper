@@ -63,8 +63,9 @@ export async function GET(request: Request) {
             console.log('Saved to cache');
         }
 
-        // Filter Data
-        const filteredBookings = DataProcessor.filterByDepartment(bookings, filterDepts);
+        // Filter Data - REMOVED for client-side filtering
+        // We now return ALL bookings so the client can filter instantly
+        const filteredBookings = bookings;
 
         // Process Data
         const stats = DataProcessor.aggregateStats(filteredBookings);

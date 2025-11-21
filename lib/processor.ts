@@ -121,38 +121,105 @@ export class DataProcessor {
      * Now accepts a target department to filter suggestions.
      */
     static generateSwapSuggestions(bookings: Booking[], targetDept?: string): SwapSuggestion[] {
-        const stats = this.aggregateStats(bookings);
         const suggestions: SwapSuggestion[] = [];
 
-        const frontHeavy = stats.filter(s => s.frontSlots > s.backSlots);
-        const backHeavy = stats.filter(s => s.backSlots > s.frontSlots);
+        // Helper to get Day of Week (0-6)
+        const getDayOfWeek = (dateStr: string) => new Date(dateStr).getDay();
 
-        // Simple matching algorithm
-        frontHeavy.forEach(fDept => {
-            // Find a matching back heavy dept
-            // Ideally one that has a surplus of back slots equal to this dept's surplus of front slots
-            const surplusFront = fDept.frontSlots - fDept.backSlots;
+        // Group bookings by Team (Group Name) -> Date
+        // Inventory: Map<TeamName, Map<Date, { front: number, back: number, frontSlots: string[], backSlots: string[] }>>
+        const inventory = new Map<string, Map<string, { front: number, back: number, frontSlots: string[], backSlots: string[] }>>();
 
-            // Look for best match
-            const match = backHeavy.find(bDept => (bDept.backSlots - bDept.frontSlots) > 0);
+        bookings.forEach(b => {
+            const teamName = this.normalizeDepartment(b.department);
+            if (!inventory.has(teamName)) inventory.set(teamName, new Map());
 
-            if (match) {
-                // Only add if it involves the target department (if specified)
-                if (targetDept && fDept.department !== targetDept && match.department !== targetDept) {
-                    return;
+            const teamInv = inventory.get(teamName)!;
+            if (!teamInv.has(b.date)) teamInv.set(b.date, { front: 0, back: 0, frontSlots: [], backSlots: [] });
+
+            const dayInv = teamInv.get(b.date)!;
+            const hour = parseInt(b.timeSlot.split(':')[0], 10);
+            const slotStr = `${b.venueId} ${b.timeSlot}`;
+
+            if (hour >= 18 && hour < 20) {
+                dayInv.front++;
+                dayInv.frontSlots.push(slotStr);
+            } else if (hour >= 20 && hour < 22) {
+                dayInv.back++;
+                dayInv.backSlots.push(slotStr);
+            }
+        });
+
+        // Identify Surplus Candidates
+        // Candidate: { team: string, date: string, type: 'FRONT' | 'BACK', slots: string[] }
+        const surplusFront: { team: string, date: string, slots: string[] }[] = [];
+        const surplusBack: { team: string, date: string, slots: string[] }[] = [];
+
+        inventory.forEach((teamInv, teamName) => {
+            teamInv.forEach((stats, date) => {
+                // Rule: Must have > 1 slot to give
+                // And preferably have imbalance (Front > Back)
+                if (stats.front > 1 && stats.front > stats.back) {
+                    surplusFront.push({ team: teamName, date, slots: stats.frontSlots });
                 }
+                if (stats.back > 1 && stats.back > stats.front) {
+                    surplusBack.push({ team: teamName, date, slots: stats.backSlots });
+                }
+            });
+        });
+
+        // Find Matches
+        // 1. Same Day Swap
+        surplusFront.forEach(giver => {
+            // Find receiver on same date who has surplus Back
+            const receiver = surplusBack.find(r => r.date === giver.date && r.team !== giver.team);
+
+            if (receiver) {
+                // Check target filter
+                if (targetDept && giver.team !== targetDept && receiver.team !== targetDept) return;
 
                 suggestions.push({
                     type: 'SWAP_SLOTS',
-                    fromDept: fDept.department,
-                    toDept: match.department,
-                    description: `${fDept.department} gives Front Slots (18-20) to ${match.department}, receives Back Slots (20-22).`,
-                    benefit: `Helps both form full blocks. ${fDept.department} has excess Front, ${match.department} has excess Back.`,
-                    score: 0.8 // Placeholder score
+                    fromDept: giver.team,
+                    toDept: receiver.team,
+                    description: `${giver.team} gives Front to ${receiver.team}, receives Back (Same Day).`,
+                    benefit: `Both have surplus slots (>1) on ${giver.date}.`,
+                    date: giver.date,
+                    fromSlots: [giver.slots[0]], // Suggest giving one
+                    toSlots: [receiver.slots[0]],
+                    score: 0.9
                 });
             }
         });
 
-        return suggestions;
+        // 2. Cross-Week Swap (Same Weekday)
+        surplusFront.forEach(giver => {
+            const giverDay = getDayOfWeek(giver.date);
+
+            // Find receiver on DIFFERENT date but SAME weekday
+            const receiver = surplusBack.find(r =>
+                r.team !== giver.team &&
+                r.date !== giver.date &&
+                getDayOfWeek(r.date) === giverDay
+            );
+
+            if (receiver) {
+                if (targetDept && giver.team !== targetDept && receiver.team !== targetDept) return;
+
+                suggestions.push({
+                    type: 'SWAP_SLOTS',
+                    fromDept: giver.team,
+                    toDept: receiver.team,
+                    description: `${giver.team} gives Front (${giver.date}) to ${receiver.team}, receives Back (${receiver.date}).`,
+                    benefit: `Cross-week swap on ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][giverDay]}. Balances inventory across weeks.`,
+                    date: `${giver.date} & ${receiver.date}`,
+                    fromSlots: [giver.slots[0]],
+                    toSlots: [receiver.slots[0]],
+                    score: 0.85
+                });
+            }
+        });
+
+        return suggestions.sort((a, b) => b.score - a.score);
     }
 }
