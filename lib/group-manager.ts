@@ -18,7 +18,8 @@ export class GroupManager {
         }
         try {
             const data = fs.readFileSync(GROUPS_FILE, 'utf-8');
-            return JSON.parse(data);
+            const parsed = JSON.parse(data);
+            return Array.isArray(parsed) ? parsed : [];
         } catch (error) {
             console.error('Error reading groups file:', error);
             return [];
@@ -55,8 +56,8 @@ export class GroupManager {
     static normalizeDepartment(rawName: string): { groupName: string; colleges: string[] } {
         const groups = this.getGroups();
         for (const group of groups) {
-            if (group.aliases.includes(rawName)) {
-                return { groupName: group.name, colleges: group.colleges };
+            if (group && Array.isArray(group.aliases) && group.aliases.includes(rawName)) {
+                return { groupName: group.name, colleges: group.colleges || [] };
             }
         }
         // If no mapping found, return the raw name as-is with empty colleges
@@ -67,21 +68,28 @@ export class GroupManager {
         const groups = this.getGroups();
         const byCollege: Record<string, GroupMapping[]> = {};
 
+        if (!Array.isArray(groups)) return {};
+
         groups.forEach(group => {
+            if (!group) return;
+
             // Add group to each of its colleges
-            group.colleges.forEach(college => {
-                if (!byCollege[college]) {
-                    byCollege[college] = [];
-                }
-                byCollege[college].push(group);
-            });
+            const colleges = group.colleges;
+            if (Array.isArray(colleges)) {
+                colleges.forEach(college => {
+                    if (!byCollege[college]) {
+                        byCollege[college] = [];
+                    }
+                    byCollege[college].push(group);
+                });
+            }
         });
 
         return byCollege;
     }
 
     static getAllGroupNames(): string[] {
-        return this.getGroups().map(g => g.name);
+        return this.getGroups().filter(g => g && g.name).map(g => g.name);
     }
 
     static getUngroupedDepartments(allDepartments: string[]): string[] {
@@ -90,7 +98,9 @@ export class GroupManager {
 
         // Collect all already-assigned aliases
         groups.forEach(group => {
-            group.aliases.forEach(alias => assignedAliases.add(alias));
+            if (group && Array.isArray(group.aliases)) {
+                group.aliases.forEach(alias => assignedAliases.add(alias));
+            }
         });
 
         // Return departments that are not yet assigned

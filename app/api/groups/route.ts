@@ -33,6 +33,8 @@ export async function POST(request: Request) {
             GroupManager.updateGroup(group.id, group);
         } else if (action === 'delete') {
             GroupManager.deleteGroup(group.id);
+        } else if (action === 'saveAll') {
+            GroupManager.saveGroups(body.groups);
         }
 
         return NextResponse.json({ success: true });

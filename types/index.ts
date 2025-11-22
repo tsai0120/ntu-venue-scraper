@@ -37,3 +37,11 @@ export interface SwapSuggestion {
   toSlots: string[];
   score: number; // Confidence/Impact score
 }
+
+export interface Group {
+  id?: string;
+  name: string;
+  colleges?: string[];
+  aliases: string[];
+  color?: string;
+}
